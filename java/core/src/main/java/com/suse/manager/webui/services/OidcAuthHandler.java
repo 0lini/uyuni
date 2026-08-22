@@ -23,8 +23,11 @@ import com.google.gson.JsonObject;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.http.HttpResponse;
+import org.apache.http.client.entity.UrlEncodedFormEntity;
 import org.apache.http.client.methods.HttpGet;
+import org.apache.http.client.methods.HttpPost;
 import org.apache.http.client.utils.URIBuilder;
+import org.apache.http.message.BasicNameValuePair;
 import org.apache.http.util.EntityUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -42,6 +45,9 @@ import org.jose4j.keys.resolvers.VerificationKeyResolver;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -56,8 +62,14 @@ public class OidcAuthHandler {
     private boolean oidcEnabled;
     private String issuer;
     private volatile String jwksUri;
+    private volatile String authorizationEndpoint;
+    private volatile String tokenEndpoint;
     private String audience;
     private String usernameClaim;
+    private String clientId;
+    private String clientSecret;
+    private String redirectUri;
+    private String scopes;
 
     private final AtomicReference<JwtConsumer> jwtConsumer = new AtomicReference<>();
     private final VerificationKeyResolver keyResolver;
@@ -181,6 +193,14 @@ public class OidcAuthHandler {
             throw new ConfigException("OIDC username claim name cannot be empty.");
         }
 
+        clientId = ConfigDefaults.get().getOidcClientId();
+        clientSecret = ConfigDefaults.get().getOidcClientSecret();
+        redirectUri = ConfigDefaults.get().getOidcRedirectUri();
+        scopes = ConfigDefaults.get().getOidcScopes();
+        if (StringUtils.isEmpty(scopes)) {
+            throw new ConfigException("OIDC scopes cannot be empty.");
+        }
+
         String jwksPath = ConfigDefaults.get().getOidcJwksPath();
         if (StringUtils.isEmpty(jwksPath)) {
             LOG.info("JWKS path not provided. Will fetch from the OIDC discovery endpoint.");
@@ -191,18 +211,17 @@ public class OidcAuthHandler {
     }
 
     /**
-     * Fetches the JWKS URI from the OIDC discovery endpoint of the issuing identity provider.
+     * Fetches the OIDC discovery document from the issuing identity provider.
      * @param issuerIn The OIDC issuer URI.
-     * @return The JWKS URI.
+     * @return The discovery document.
      * @throws URISyntaxException if a malformed URI is encountered.
      */
-    private String fetchJwksUri(URI issuerIn) throws URISyntaxException {
+    private JsonObject fetchDiscoveryDocument(URI issuerIn) throws URISyntaxException {
         URI discoveryEndpoint = appendUriPath(issuerIn, OIDC_DISCOVERY_PATH);
-        LOG.info("Fetching JWKS path from OIDC discovery endpoint: {}", discoveryEndpoint);
+        LOG.info("Fetching OIDC discovery document from: {}", discoveryEndpoint);
 
         HttpGet request = new HttpGet(discoveryEndpoint);
         HttpResponse response;
-        String uri;
 
         try {
             response = httpClient.executeRequest(request);
@@ -216,17 +235,11 @@ public class OidcAuthHandler {
             String jsonResponse = EntityUtils.toString(response.getEntity());
             JsonObject jsonObject = new Gson().fromJson(jsonResponse, JsonObject.class);
 
-            if (jsonObject == null || !jsonObject.has("jwks_uri") || jsonObject.get("jwks_uri").isJsonNull()) {
-                throw new ConfigException("JWKS URI not found in the OIDC discovery document from " +
-                        discoveryEndpoint);
+            if (jsonObject == null) {
+                throw new ConfigException("OIDC discovery document from " + discoveryEndpoint + " is empty.");
             }
 
-            uri = jsonObject.get("jwks_uri").getAsString();
-
-            if (StringUtils.isEmpty(uri)) {
-                throw new ConfigException("JWKS URI not found in the OIDC discovery document from " +
-                        discoveryEndpoint);
-            }
+            return jsonObject;
         }
         catch (IOException e) {
             throw new ConfigException("Error while fetching OIDC discovery document from " + discoveryEndpoint, e);
@@ -234,7 +247,49 @@ public class OidcAuthHandler {
         finally {
             request.releaseConnection();
         }
+    }
 
+    private synchronized void ensureDiscoveryEndpoints() throws OidcAuthException {
+        if (!isBrowserLoginEnabled() || StringUtils.isNotEmpty(authorizationEndpoint)) {
+            return;
+        }
+
+        try {
+            JsonObject discoveryDocument = fetchDiscoveryDocument(new URI(issuer));
+            authorizationEndpoint = getRequiredDiscoveryValue(discoveryDocument, "authorization_endpoint");
+            tokenEndpoint = getRequiredDiscoveryValue(discoveryDocument, "token_endpoint");
+
+            if (StringUtils.isEmpty(jwksUri)) {
+                jwksUri = getRequiredDiscoveryValue(discoveryDocument, "jwks_uri");
+            }
+        }
+        catch (URISyntaxException | ConfigException e) {
+            throw new OidcAuthException("OIDC discovery document is not available.", e);
+        }
+    }
+
+    private static String getRequiredDiscoveryValue(JsonObject discoveryDocument, String key) {
+        if (!discoveryDocument.has(key) || discoveryDocument.get(key).isJsonNull()) {
+            throw new ConfigException("Required field '" + key + "' not found in the OIDC discovery document.");
+        }
+
+        String value = discoveryDocument.get(key).getAsString();
+        if (StringUtils.isEmpty(value)) {
+            throw new ConfigException("Required field '" + key + "' not found in the OIDC discovery document.");
+        }
+
+        return value;
+    }
+
+    /**
+     * Fetches the JWKS URI from the OIDC discovery endpoint of the issuing identity provider.
+     * @param issuerIn The OIDC issuer URI.
+     * @return The JWKS URI.
+     * @throws URISyntaxException if a malformed URI is encountered.
+     */
+    private String fetchJwksUri(URI issuerIn) throws URISyntaxException {
+        JsonObject discoveryDocument = fetchDiscoveryDocument(issuerIn);
+        String uri = getRequiredDiscoveryValue(discoveryDocument, "jwks_uri");
         LOG.debug("Successfully fetched JWKS URI: {}", uri);
         return uri;
     }
@@ -285,6 +340,17 @@ public class OidcAuthHandler {
      * @throws OidcAuthException if token verification fails or OIDC is not enabled.
      */
     public String handleOidcLogin(String token) throws OidcAuthException {
+        return handleOidcLogin(token, null);
+    }
+
+    /**
+     * Handles OIDC login by verifying the provided token using a {@link JwtConsumer}.
+     * @param token The OIDC token.
+     * @param expectedNonce Optional nonce claim value to validate for browser-based login.
+     * @return The username claim.
+     * @throws OidcAuthException if token verification fails or OIDC is not enabled.
+     */
+    public String handleOidcLogin(String token, String expectedNonce) throws OidcAuthException {
         if (!isOidcEnabled()) {
             throw new OidcAuthException("OIDC authorization is not enabled.");
         }
@@ -300,6 +366,12 @@ public class OidcAuthHandler {
             if (!claims.hasClaim(usernameClaim)) {
                 throw new OidcAuthException("Token verification failed. Missing '" + usernameClaim + "' claim.");
             }
+            if (expectedNonce != null) {
+                String nonce = claims.getClaimValueAsString("nonce");
+                if (!expectedNonce.equals(nonce)) {
+                    throw new OidcAuthException("Token verification failed. Nonce claim mismatch.");
+                }
+            }
             return claims.getClaimValueAsString(usernameClaim);
         }
         catch (InvalidJwtException | MalformedClaimException e) {
@@ -308,11 +380,116 @@ public class OidcAuthHandler {
     }
 
     /**
+     * Builds the authorization URL for browser-based OIDC SSO login.
+     * @param state OAuth2 state parameter for CSRF protection
+     * @param nonce OIDC nonce parameter for replay protection
+     * @return the authorization URL
+     * @throws OidcAuthException if browser login is not configured or discovery fails
+     */
+    public String buildAuthorizationUrl(String state, String nonce) throws OidcAuthException {
+        if (!isBrowserLoginEnabled()) {
+            throw new OidcAuthException("OIDC browser login is not configured.");
+        }
+
+        ensureDiscoveryEndpoints();
+
+        try {
+            return new URIBuilder(authorizationEndpoint)
+                    .addParameter("response_type", "code")
+                    .addParameter("client_id", clientId)
+                    .addParameter("redirect_uri", getEffectiveRedirectUri())
+                    .addParameter("scope", scopes)
+                    .addParameter("state", state)
+                    .addParameter("nonce", nonce)
+                    .build()
+                    .toString();
+        }
+        catch (URISyntaxException e) {
+            throw new OidcAuthException("Unable to build OIDC authorization URL.", e);
+        }
+    }
+
+    /**
+     * Exchanges an authorization code for an ID token.
+     * @param code The authorization code returned by the identity provider
+     * @return The ID token
+     * @throws OidcAuthException if the token exchange fails
+     */
+    public String exchangeAuthorizationCode(String code) throws OidcAuthException {
+        if (!isBrowserLoginEnabled()) {
+            throw new OidcAuthException("OIDC browser login is not configured.");
+        }
+
+        ensureDiscoveryEndpoints();
+
+        HttpPost request = new HttpPost(tokenEndpoint);
+        List<BasicNameValuePair> params = new ArrayList<>();
+        params.add(new BasicNameValuePair("grant_type", "authorization_code"));
+        params.add(new BasicNameValuePair("code", code));
+        params.add(new BasicNameValuePair("redirect_uri", getEffectiveRedirectUri()));
+        params.add(new BasicNameValuePair("client_id", clientId));
+        if (StringUtils.isNotEmpty(clientSecret)) {
+            params.add(new BasicNameValuePair("client_secret", clientSecret));
+        }
+
+        try {
+            request.setEntity(new UrlEncodedFormEntity(params, StandardCharsets.UTF_8));
+            request.setHeader("Accept", "application/json");
+            HttpResponse response = httpClient.executeRequest(request);
+            int statusCode = response.getStatusLine().getStatusCode();
+            String jsonResponse = EntityUtils.toString(response.getEntity());
+
+            if (statusCode != 200) {
+                throw new OidcAuthException("OIDC token exchange failed with HTTP status code " + statusCode + ".");
+            }
+
+            JsonObject tokenResponse = new Gson().fromJson(jsonResponse, JsonObject.class);
+            if (tokenResponse == null || !tokenResponse.has("id_token") || tokenResponse.get("id_token").isJsonNull()) {
+                throw new OidcAuthException("OIDC token response does not contain an id_token.");
+            }
+
+            String idToken = tokenResponse.get("id_token").getAsString();
+            if (StringUtils.isEmpty(idToken)) {
+                throw new OidcAuthException("OIDC token response does not contain an id_token.");
+            }
+
+            return idToken;
+        }
+        catch (IOException e) {
+            throw new OidcAuthException("OIDC token exchange failed.", e);
+        }
+        finally {
+            request.releaseConnection();
+        }
+    }
+
+    /**
+     * Returns the redirect URI used for browser-based OIDC SSO login.
+     * @return the redirect URI
+     */
+    public String getEffectiveRedirectUri() {
+        if (StringUtils.isNotEmpty(redirectUri)) {
+            return redirectUri;
+        }
+
+        String scheme = ConfigDefaults.get().isSsl() ? "https" : "http";
+        return scheme + "://" + ConfigDefaults.get().getHostname() + "/rhn/manager/oidc/callback";
+    }
+
+    /**
      * Checks if OIDC authorization is enabled by configuration.
      * @return {@code true} if OIDC is enabled, {@code false} otherwise.
      */
     public boolean isOidcEnabled() {
         return oidcEnabled;
+    }
+
+    /**
+     * Checks if browser-based OIDC SSO login is configured.
+     * @return {@code true} if browser login is configured, {@code false} otherwise.
+     */
+    public boolean isBrowserLoginEnabled() {
+        return ConfigDefaults.get().isOidcBrowserLoginEnabled();
     }
 
     /**

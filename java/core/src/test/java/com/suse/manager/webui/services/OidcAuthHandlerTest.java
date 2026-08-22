@@ -326,6 +326,108 @@ public class OidcAuthHandlerTest extends BaseTestCaseWithUser {
         }
     }
 
+    @Test
+    public void testBrowserLoginDisabledWithoutClientId() {
+        enableOidcLogin();
+        OidcAuthHandler handler = new OidcAuthHandler(null, new HttpClientAdapter());
+        assertTrue(handler.isOidcEnabled());
+        assertTrue(!ConfigDefaults.get().isOidcBrowserLoginEnabled());
+    }
+
+    @Test
+    public void testBuildAuthorizationUrl() {
+        WireMockServer wireMockServer = new WireMockServer(WireMockConfiguration.wireMockConfig().dynamicPort());
+        wireMockServer.start();
+        try {
+            String issuer = "http://localhost:" + wireMockServer.port();
+            String authorizationEndpoint = issuer + "/authorize";
+            String tokenEndpoint = issuer + "/token";
+            String jwksUri = issuer + JWKS_URI;
+            String oidcConfig = String.format(
+                    "{\"authorization_endpoint\":\"%s\",\"token_endpoint\":\"%s\",\"jwks_uri\":\"%s\"}",
+                    authorizationEndpoint, tokenEndpoint, jwksUri);
+
+            wireMockServer.stubFor(WireMock.get(OidcAuthHandler.OIDC_DISCOVERY_PATH)
+                    .willReturn(WireMock.aResponse()
+                            .withStatus(200)
+                            .withHeader("Content-Type", "application/json")
+                            .withBody(oidcConfig)));
+
+            enableOidcBrowserLogin();
+            Config.get().setString(ConfigDefaults.OIDC_IDP_ISSUER, issuer);
+            Config.get().setString(ConfigDefaults.OIDC_IDP_JWKS_PATH, "");
+            Config.get().setString(ConfigDefaults.OIDC_REDIRECT_URI, "https://uyuni.example/rhn/manager/oidc/callback");
+
+            OidcAuthHandler handler = new OidcAuthHandler(null, new HttpClientAdapter());
+            String authorizationUrl = handler.buildAuthorizationUrl("state-123", "nonce-456");
+
+            assertTrue(authorizationUrl.startsWith(authorizationEndpoint));
+            assertTrue(authorizationUrl.contains("response_type=code"));
+            assertTrue(authorizationUrl.contains("client_id=uyuni-client"));
+            assertTrue(authorizationUrl.contains("state=state-123"));
+            assertTrue(authorizationUrl.contains("nonce=nonce-456"));
+        }
+        catch (OidcAuthException e) {
+            throw new RuntimeException(e);
+        }
+        finally {
+            wireMockServer.stop();
+        }
+    }
+
+    @Test
+    public void testExchangeAuthorizationCode() throws JoseException, OidcAuthException {
+        WireMockServer wireMockServer = new WireMockServer(WireMockConfiguration.wireMockConfig().dynamicPort());
+        wireMockServer.start();
+        try {
+            String issuer = "http://localhost:" + wireMockServer.port();
+            String authorizationEndpoint = issuer + "/authorize";
+            String tokenEndpoint = issuer + "/token";
+            String jwksUri = issuer + JWKS_URI;
+            String oidcConfig = String.format(
+                    "{\"authorization_endpoint\":\"%s\",\"token_endpoint\":\"%s\",\"jwks_uri\":\"%s\"}",
+                    authorizationEndpoint, tokenEndpoint, jwksUri);
+            String idToken = issueToken(rsaKeyPair.getPrivate(), AlgorithmIdentifiers.RSA_USING_SHA256, issuer,
+                    List.of(MCP_AUDIENCE, MLM_AUDIENCE), Map.of(USERNAME_CLAIM, user.getLogin()));
+
+            wireMockServer.stubFor(WireMock.get(OidcAuthHandler.OIDC_DISCOVERY_PATH)
+                    .willReturn(WireMock.aResponse()
+                            .withStatus(200)
+                            .withHeader("Content-Type", "application/json")
+                            .withBody(oidcConfig)));
+            wireMockServer.stubFor(WireMock.post("/token")
+                    .willReturn(WireMock.aResponse()
+                            .withStatus(200)
+                            .withHeader("Content-Type", "application/json")
+                            .withBody(String.format("{\"id_token\":\"%s\"}", idToken))));
+
+            enableOidcBrowserLogin();
+            Config.get().setString(ConfigDefaults.OIDC_IDP_ISSUER, issuer);
+            Config.get().setString(ConfigDefaults.OIDC_IDP_JWKS_PATH, "");
+            Config.get().setString(ConfigDefaults.OIDC_REDIRECT_URI, "https://uyuni.example/rhn/manager/oidc/callback");
+
+            OidcAuthHandler handler = getHandler(rsaKeyPair.getPublic(), new HttpClientAdapter());
+            String token = handler.exchangeAuthorizationCode("auth-code");
+            String username = handler.handleOidcLogin(token);
+
+            assertEquals(user.getLogin(), username);
+        }
+        finally {
+            wireMockServer.stop();
+        }
+    }
+
+    @Test
+    public void testNonceMismatch() throws JoseException {
+        String token = issueToken(rsaKeyPair.getPrivate(), AlgorithmIdentifiers.RSA_USING_SHA256, ISSUER,
+                List.of(MCP_AUDIENCE, MLM_AUDIENCE), Map.of(USERNAME_CLAIM, user.getLogin(), "nonce", "expected"));
+
+        OidcAuthHandler handler = getHandler();
+
+        Exception e = assertThrows(OidcAuthException.class, () -> handler.handleOidcLogin(token, "different"));
+        assertTrue(e.getMessage().contains("Nonce claim mismatch."));
+    }
+
     private OidcAuthHandler getHandler() throws JoseException {
         return getHandler(rsaKeyPair.getPublic());
     }
@@ -345,6 +447,13 @@ public class OidcAuthHandlerTest extends BaseTestCaseWithUser {
         Config.get().setBoolean(ConfigDefaults.OIDC_ENABLED, "true");
         Config.get().setString(ConfigDefaults.OIDC_IDP_ISSUER, ISSUER);
         Config.get().setString(ConfigDefaults.OIDC_IDP_JWKS_PATH, JWKS_URI);
+    }
+
+    private void enableOidcBrowserLogin() {
+        enableOidcLogin();
+        Config.get().setString(ConfigDefaults.OIDC_CLIENT_ID, "uyuni-client");
+        Config.get().setString(ConfigDefaults.OIDC_CLIENT_SECRET, "client-secret");
+        Config.get().setString(ConfigDefaults.OIDC_SCOPES, "openid profile");
     }
 
     private String signToken(JwtClaims claims, Key signingKey, String algorithm) throws JoseException {

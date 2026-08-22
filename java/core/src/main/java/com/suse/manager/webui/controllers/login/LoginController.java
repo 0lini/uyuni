@@ -26,6 +26,7 @@ import com.redhat.rhn.frontend.security.AuthenticationServiceFactory;
 import com.redhat.rhn.manager.acl.AclManager;
 import com.redhat.rhn.manager.user.UserManager;
 
+import com.suse.manager.webui.controllers.OidcController;
 import com.suse.manager.webui.services.OidcAuthException;
 import com.suse.manager.webui.services.OidcAuthHandler;
 import com.suse.manager.webui.utils.LoginHelper;
@@ -46,6 +47,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 
 import javax.security.auth.login.LoginException;
 
@@ -115,6 +117,23 @@ public class LoginController {
                 The return at the end of the method is dummy: the login page will not be displayed as we will be
                 redirected to IdP's login page.
              */
+        }
+        else if (oidcAuthHandler.isBrowserLoginEnabled()) {
+            try {
+                String state = UUID.randomUUID().toString();
+                String nonce = UUID.randomUUID().toString();
+                String urlBounce = request.queryParams("url_bounce");
+                String reqMethod = request.queryParams("request_method");
+                urlBounce = LoginHelper.updateUrlBounce(urlBounce, reqMethod);
+
+                request.raw().getSession().setAttribute(OidcController.OIDC_STATE_SESSION_ATTR, state);
+                request.raw().getSession().setAttribute(OidcController.OIDC_NONCE_SESSION_ATTR, nonce);
+                request.raw().getSession().setAttribute(OidcController.OIDC_URL_BOUNCE_SESSION_ATTR, urlBounce);
+                response.redirect(oidcAuthHandler.buildAuthorizationUrl(state, nonce));
+            }
+            catch (OidcAuthException e) {
+                LOGGER.error("OIDC AUTH FAILURE: Unable to start browser login.", e);
+            }
         }
         else {
             if (!UserManager.satelliteHasUsers()) { // Redirect to user creation if needed

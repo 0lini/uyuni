@@ -439,6 +439,10 @@ public class ConfigDefaults {
     public static final String OIDC_IDP_JWKS_PATH = "web.oidc.idp.jwks_path";
     public static final String OIDC_JWT_AUDIENCE = "web.oidc.jwt.audience";
     public static final String OIDC_JWT_USERNAME_CLAIM = "web.oidc.jwt.username_claim";
+    public static final String OIDC_CLIENT_ID = "web.oidc.client_id";
+    public static final String OIDC_CLIENT_SECRET = "web.oidc.client_secret";
+    public static final String OIDC_REDIRECT_URI = "web.oidc.redirect_uri";
+    public static final String OIDC_SCOPES = "web.oidc.scopes";
 
     /**
      * Returns true if OIDC authorization is enabled
@@ -491,6 +495,46 @@ public class ConfigDefaults {
      */
     public String getOidcUsernameClaim() {
         return Config.get().getString(OIDC_JWT_USERNAME_CLAIM, "preferred_username");
+    }
+
+    /**
+     * Returns the OAuth2/OIDC client identifier for browser-based SSO login.
+     * @return the client id
+     */
+    public String getOidcClientId() {
+        return Config.get().getString(OIDC_CLIENT_ID, "");
+    }
+
+    /**
+     * Returns the OAuth2/OIDC client secret for browser-based SSO login.
+     * @return the client secret
+     */
+    public String getOidcClientSecret() {
+        return Config.get().getString(OIDC_CLIENT_SECRET, "");
+    }
+
+    /**
+     * Returns the redirect URI registered with the identity provider for the authorization code flow.
+     * @return the redirect URI, or empty to derive it from the server hostname
+     */
+    public String getOidcRedirectUri() {
+        return Config.get().getString(OIDC_REDIRECT_URI, "");
+    }
+
+    /**
+     * Returns the OIDC scopes requested during browser-based SSO login.
+     * @return the requested scopes
+     */
+    public String getOidcScopes() {
+        return Config.get().getString(OIDC_SCOPES, "openid");
+    }
+
+    /**
+     * Returns true if browser-based OIDC SSO login is configured.
+     * @return true when OIDC is enabled and a client id is configured
+     */
+    public boolean isOidcBrowserLoginEnabled() {
+        return isOidcEnabled() && !getOidcClientId().isEmpty();
     }
 
 
