@@ -15,7 +15,7 @@ services:
       - ../../:/workspaces/uyuni:cached
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
     user: root
-    links:
+    depends_on:
       - db
     ports:
       - "443:443"   # UI HTTPS

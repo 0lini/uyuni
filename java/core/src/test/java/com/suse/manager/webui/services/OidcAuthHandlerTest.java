@@ -353,9 +353,9 @@ public class OidcAuthHandlerTest extends BaseTestCaseWithUser {
                             .withHeader("Content-Type", "application/json")
                             .withBody(oidcConfig)));
 
+            enableOidcBrowserLogin();
             Config.get().setString(ConfigDefaults.OIDC_IDP_ISSUER, issuer);
             Config.get().setString(ConfigDefaults.OIDC_IDP_JWKS_PATH, "");
-            enableOidcBrowserLogin();
             Config.get().setString(ConfigDefaults.OIDC_REDIRECT_URI, "https://uyuni.example/rhn/manager/oidc/callback");
 
             OidcAuthHandler handler = new OidcAuthHandler(null, new HttpClientAdapter());
@@ -401,9 +401,9 @@ public class OidcAuthHandlerTest extends BaseTestCaseWithUser {
                             .withHeader("Content-Type", "application/json")
                             .withBody(String.format("{\"id_token\":\"%s\"}", idToken))));
 
+            enableOidcBrowserLogin();
             Config.get().setString(ConfigDefaults.OIDC_IDP_ISSUER, issuer);
             Config.get().setString(ConfigDefaults.OIDC_IDP_JWKS_PATH, "");
-            enableOidcBrowserLogin();
             Config.get().setString(ConfigDefaults.OIDC_REDIRECT_URI, "https://uyuni.example/rhn/manager/oidc/callback");
 
             OidcAuthHandler handler = getHandler(rsaKeyPair.getPublic(), new HttpClientAdapter());
