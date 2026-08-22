@@ -60,6 +60,7 @@ import com.suse.manager.webui.controllers.ProductsController;
 import com.suse.manager.webui.controllers.ProxyConfigurationController;
 import com.suse.manager.webui.controllers.ProxyController;
 import com.suse.manager.webui.controllers.RecurringActionController;
+import com.suse.manager.webui.controllers.OidcController;
 import com.suse.manager.webui.controllers.SSOController;
 import com.suse.manager.webui.controllers.SaltSSHController;
 import com.suse.manager.webui.controllers.SaltbootController;
@@ -257,6 +258,10 @@ public class Router implements SparkApplication {
         // Single Sign-On (SSO) via SAML
         SSOController ssoController = new SSOController(ssoSettings);
         ssoController.initRoutes();
+
+        // Browser-based OIDC SSO
+        OidcController oidcController = new OidcController(oidcAuthHandlerIn);
+        oidcController.initRoutes();
 
         // Maintenance windows
         MaintenanceController.initRoutes();

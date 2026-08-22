@@ -1,7 +1,8 @@
 -------------------------------------------------------------------
 Wed Aug 05 16:53:44 CEST 2026 - antonio.garofalo@suse.com
 
-- version 5.3.1-0
+- version 5.3.2-0
+  * Add RBAC endpoint for browser-based OIDC SSO callback
   * updated tables for CoCo attestation restructuring
   * Use temp table for hidden packages (bsc#1267912)
   * Bump version to 5.3.0

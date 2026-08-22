@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.redhat.rhn.common.conf.Config;
 import com.redhat.rhn.common.conf.ConfigDefaults;
 import com.redhat.rhn.common.localization.LocalizationService;
+import com.redhat.rhn.common.util.http.HttpClientAdapter;
 import com.redhat.rhn.domain.user.User;
 import com.redhat.rhn.manager.user.UserManager;
 import com.redhat.rhn.testing.RhnMockHttpServletRequest;
@@ -30,6 +31,10 @@ import com.redhat.rhn.testing.UserTestUtils;
 import com.suse.manager.webui.controllers.login.LoginController;
 import com.suse.manager.webui.services.OidcAuthHandler;
 import com.suse.manager.webui.utils.LoginHelper;
+
+import com.github.tomakehurst.wiremock.WireMockServer;
+import com.github.tomakehurst.wiremock.client.WireMock;
+import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import com.suse.utils.Json;
 
 import com.onelogin.saml2.settings.Saml2Settings;
@@ -142,6 +147,59 @@ public class LoginControllerTest extends BaseControllerTestCase {
         assertTrue(rawSamlXml.contains("AssertionConsumerServiceURL=\"https://localhost/acs.jsp\""));
         // Check the destination (IdP SSO URL)
         assertTrue(rawSamlXml.contains("Destination=\"https://idp/sso\""));
+    }
+
+    @Test
+    public void testLoginWithOidcBrowserSso() throws Exception {
+        Config.get().setBoolean(ConfigDefaults.SINGLE_SIGN_ON_ENABLED, "false");
+
+        WireMockServer wireMockServer = new WireMockServer(WireMockConfiguration.wireMockConfig().dynamicPort());
+        wireMockServer.start();
+        try {
+            String issuer = "http://localhost:" + wireMockServer.port();
+            String authorizationEndpoint = issuer + "/authorize";
+            String tokenEndpoint = issuer + "/token";
+            String jwksUri = issuer + "/.well-known/jwks.json";
+            String oidcConfig = String.format(
+                    "{\"authorization_endpoint\":\"%s\",\"token_endpoint\":\"%s\",\"jwks_uri\":\"%s\"}",
+                    authorizationEndpoint, tokenEndpoint, jwksUri);
+
+            wireMockServer.stubFor(WireMock.get(OidcAuthHandler.OIDC_DISCOVERY_PATH)
+                    .willReturn(WireMock.aResponse()
+                            .withStatus(200)
+                            .withHeader("Content-Type", "application/json")
+                            .withBody(oidcConfig)));
+
+            Config.get().setBoolean(ConfigDefaults.OIDC_ENABLED, "true");
+            Config.get().setString(ConfigDefaults.OIDC_IDP_ISSUER, issuer);
+            Config.get().setString(ConfigDefaults.OIDC_IDP_JWKS_PATH, "");
+            Config.get().setString(ConfigDefaults.OIDC_CLIENT_ID, "uyuni-client");
+            Config.get().setString(ConfigDefaults.OIDC_CLIENT_SECRET, "client-secret");
+            Config.get().setString(ConfigDefaults.OIDC_REDIRECT_URI, "https://uyuni.example/rhn/manager/oidc/callback");
+
+            loginController = new LoginController(new OidcAuthHandler(null, new HttpClientAdapter()), Optional.empty());
+
+            final String requestUrl = "http://localhost:8080/rhn/manager/login";
+            final RouteMatch match = new RouteMatch(new Object(), requestUrl, requestUrl, "");
+            final RhnMockHttpServletRequest mockRequest = new RhnMockHttpServletRequest();
+            mockRequest.setRequestURL(requestUrl);
+            mockRequest.setPathInfo(URI.create(requestUrl).getPath());
+            mockRequest.addParameter("url_bounce", "/rhn/users/UserDetails.do?uid=1");
+
+            response = RequestResponseFactory.create(new RhnMockHttpServletResponse());
+            loginController.loginView(RequestResponseFactory.create(match, mockRequest), response);
+
+            RhnMockHttpServletResponse mockResponse = (RhnMockHttpServletResponse) response.raw();
+            assertNotNull(mockResponse.getRedirect(), "The controller must issue a redirect to the IdP");
+            assertTrue(mockResponse.getRedirect().startsWith(authorizationEndpoint));
+            assertNotNull(mockRequest.getSession().getAttribute(OidcController.OIDC_STATE_SESSION_ATTR));
+            assertNotNull(mockRequest.getSession().getAttribute(OidcController.OIDC_NONCE_SESSION_ATTR));
+            assertEquals("/rhn/users/UserDetails.do?uid=1",
+                    mockRequest.getSession().getAttribute(OidcController.OIDC_URL_BOUNCE_SESSION_ATTR));
+        }
+        finally {
+            wireMockServer.stop();
+        }
     }
 
     @Test
